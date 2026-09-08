@@ -1,0 +1,4 @@
+# dsh-knowledge-recall bundle patch
+- insert:
+    - id: knowledge-recall
+      name: dsh-knowledge-recall
