@@ -43,6 +43,8 @@ export const Config = z.object({
   libs: z.array(z.string()).default(ALL_LIBS),
   /** 单轮最多注入条数。 */
   maxHits: z.number().default(4),
+  /** 会话首回合开场宽检索（放宽词数/阈值）。 */
+  openingScan: z.boolean().default(true),
   /** 子代理（delegationDepth>0）预算系数。 */
   subagentBudgetFactor: z.number().default(0.5),
   /** 知识库目录（空 = $DSH_HOME/weaver-kb/db 或 ~/.dsh/weaver-kb/db）。 */
@@ -53,16 +55,30 @@ export const Config = z.object({
 
 const PLUGIN = 'dsh-knowledge-recall'
 
+/** 设置页配置命名空间（settings.yaml 持久化；重启生效）。 */
+export const SETTINGS_NAMESPACE = 'knowledge-recall'
+
 /** 字符/token 估算系数（中文为主文本的保守折算）。 */
 const CHARS_PER_TOKEN = 2
 
 export function apply(ctx, config = {}) {
+  // settings.yaml 持久化值优先（设置页保存 → 重启生效），缺失回退 Config 默认。
+  try {
+    const settings = ctx.get('settings')
+    const section = settings?.get?.(SETTINGS_NAMESPACE)
+    if (section && typeof section === 'object') config = { ...config, ...section }
+  } catch { /* settings 服务缺失时用 Config */ }
+  // 设置页注册（Host 侧；Browser 侧见 client/）
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.settings.register(SETTINGS_NAMESPACE, Config)
+  })
   const cfg = {
     enabled: true,
     maxTokensPerTurn: 400,
     minScore: 4,
     libs: ALL_LIBS,
     maxHits: 4,
+    openingScan: true,
     subagentBudgetFactor: 0.5,
     dbDir: '',
     aliases: {},
@@ -71,6 +87,7 @@ export function apply(ctx, config = {}) {
   const aliases = { ...DEFAULT_ALIASES, ...(cfg.aliases || {}) }
   const dbDir = cfg.dbDir || defaultDbDir()
   const throttle = new RecallThrottle()
+  const firstScanned = new Set()
 
   ctx.on('agent/pre-step', async (payload, next) => {
     // 下游先行：拿到含 ACP/WC/maid/time-ink 等注入的完整决策。
@@ -81,9 +98,9 @@ export function apply(ctx, config = {}) {
     try {
       if (!hasRealUserMessage(decision.messages)) return decision
       const sessionId = payload.agent?.session?.id ?? payload.agent?.id ?? ''
-      // 子代理预算减半（delegationDepth>0；字段路径 M1 时按宿主对象核实）。
+      // 子代理预算减半（delegationDepth 在 session.header；宿主对象核实于 2026-09-08 M1）。
       const agent = payload.agent || {}
-      const depth = agent.delegationDepth ?? agent.session?.delegationDepth ?? 0
+      const depth = agent.delegationDepth ?? agent.session?.header?.delegationDepth ?? agent.session?.delegationDepth ?? 0
       const budgetTokens = depth > 0
         ? Math.floor(cfg.maxTokensPerTurn * cfg.subagentBudgetFactor)
         : cfg.maxTokensPerTurn
@@ -94,14 +111,17 @@ export function apply(ctx, config = {}) {
       if (remainingChars <= 0) return decision
 
       const text = lastRealUserText(decision.messages)
-      const terms = extractKeywords(text, { aliases, maxTerms: 6 })
+      // 开场宽检索：会话首回合放宽词数与命中数（cfg.openingScan 默认 true）。
+      const isFirst = cfg.openingScan && !firstScanned.has(sessionId)
+      if (isFirst) firstScanned.add(sessionId)
+      const terms = extractKeywords(text, { aliases, maxTerms: isFirst ? 12 : 6 })
       if (terms.length === 0) return decision
 
       const hits = await searchWeaver(terms, {
         dbDir,
         libs: cfg.libs,
-        minScore: cfg.minScore,
-        maxHits: cfg.maxHits,
+        minScore: isFirst ? Math.max(2, cfg.minScore - 2) : cfg.minScore,
+        maxHits: isFirst ? Math.max(4, cfg.maxHits) : cfg.maxHits,
       })
       if (hits.length === 0) return decision
 

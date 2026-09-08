@@ -46,6 +46,15 @@ const LATIN_STOP = new Set([
 const CJK_RE = /[\u4e00-\u9fff]+/g
 const LATIN_RE = /[A-Za-z][A-Za-z0-9_-]{2,}/g
 
+/** CJK 引导/语气前缀（命中则剥离；剩余不足 4 字丢弃该段）。 */
+const CJK_LEAD = [
+  '帮我看看', '帮我查', '帮忙看看', '帮我一下', '请问一下', '麻烦帮我',
+  '怎么配置', '怎么样', '怎么做', '如何配置', '如何实现', '怎么弄',
+  '有没有', '是不是', '能不能', '可不可以', '那些', '这个', '那个',
+  '我们', '咱们', '需要', '相关', '什么', '一下', '帮我', '看看',
+  '请问', '麻烦', '想要', '想把', '可以', '一起', '继续', '关于',
+]
+
 /** 剥除样板块（[acp:...] 行首块、system-reminder 等），避免样板词进查询。 */
 export function stripBoilerplate(text) {
   return String(text || '')
@@ -110,10 +119,15 @@ export function extractKeywords(text, { aliases = {}, maxTerms = 6 } = {}) {
     if (w.length >= 3 && !LATIN_STOP.has(w) && !hitAliasKeys.has(w)) push(w)
     if (terms.length >= maxTerms) break
   }
-  // 3) CJK 滑窗（4~12 字整段；>12 滑窗）
-  for (const seg of clean.match(CJK_RE) || []) {
-    if (seg.length >= 4 && seg.length <= 12) push(seg)
-    else if (seg.length > 12) {
+  // 3) CJK 滑窗（4~12 字整段；>12 滑窗；剥离引导前缀）
+  for (const raw of clean.match(CJK_RE) || []) {
+    let seg = raw
+    for (const lead of CJK_LEAD) {
+      if (seg.startsWith(lead)) { seg = seg.slice(lead.length); break }
+    }
+    if (seg.length < 4) continue
+    if (seg.length <= 12) push(seg)
+    else {
       push(seg.slice(0, 12))
       for (let s = 8; s + 8 <= seg.length && terms.length < maxTerms; s += 8) {
         push(seg.slice(s, s + 12))

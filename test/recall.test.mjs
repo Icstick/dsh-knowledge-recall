@@ -60,6 +60,14 @@ test('extractKeywords：别名命中（CJK 与拉丁 key）', () => {
   assert.ok(ks2.includes('dsh-adaptive-context'), JSON.stringify(ks2))
 })
 
+test('extractKeywords：CJK 引导词剥离', () => {
+  const ks1 = extractKeywords('帮我看看明日方舟基建效率怎么配', {})
+  assert.ok(ks1.some(k => k.includes('明日方舟基建')), JSON.stringify(ks1))
+  // 纯引导短语段应被丢弃（剥后不足 4 字）
+  const ks2 = extractKeywords('麻烦帮我看看', {})
+  assert.ok(ks2.length === 0, JSON.stringify(ks2))
+})
+
 test('stripBoilerplate 剔除 acp/reminder 样板', () => {
   const raw = '确认待办\n[acp:user_input | id=x] 历史回显\n[work-state] goal: xxx\n请继续'
   const clean = stripBoilerplate(raw)

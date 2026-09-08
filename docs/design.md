@@ -1,6 +1,7 @@
 # dsh-knowledge-recall 设计（repo 内摘要）
 
 > 完整设计定稿：DSH 工作区 `docs/plans/weaver-knowledge-recall-20260908.md`（v1）
+> 状态：M0 ✅（2026-09-08 端到端验证通过）· M1 ✅（openingScan/设置页/depth 修正/CJK 剥离）· M2 待排
 > 全案计划：`docs/plans/knowledge-flow-plan-20260908.md`
 > 本文档 = repo 内维护的机制说明（与 AGENTS.md 同步更新）。
 
@@ -28,8 +29,12 @@
 4. CJK 连续段：4~12 字整段；>12 字滑窗（前 12 + 8 步进）；
 5. 总量 ≤ maxTerms（默认 6）。
 
+## 实施状态
+- M0（2026-09-08）：repo 骨架/关键词化/LIKE+FTS 检索/pre-step 注入/预算护栏/节流；单测 15 → 端到端验证通过（真实提问精确命中 wv-20260902-004）
+- M1（2026-09-08）：openingScan 开场宽检索（首回合词数 12/阈值 -2）；delegationDepth 修正（session.header.delegationDepth，源码核实）；host settings.register + settings.yaml 合并；client 设置页 section（build:client → lib/client.js）；CJK 引导词剥离（CJK_LEAD）；单测 18
+
 ## 已知边界（M2 待办）
 - FTS 中文分词弱 → 中文依赖 LIKE 子串（召回够用、精度靠 minScore）；
-- minScore 默认 4 为初值，需真实消息语料标定（设计文档 M2）；
-- delegationDepth 字段路径以宿主对象为准（M1 核实）；
-- 阈值/别名调优日志见 design v1 §7 风险。
+- minScore 默认 4 为初值，需真实消息语料标定（G4 代号类噪声：库缺内容 + 泛词，观察记录中）；
+- aliases/libs 等复杂配置项暂无 UI（settings.yaml 手改）；
+- 注入第三条噪声观察：settings 卡片词法误命中相关度一般条目（调优随 M2）。

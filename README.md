@@ -22,6 +22,10 @@ weaver 知识自动召回：真实用户消息到达时，自动检索本地 wea
 - 节流：同会话同命中集合不重复注入
 - fail-open：检索/注入故障仅降级日志，不阻断回合
 
+## 设置页
+
+设置 → 插件 →「知识召回」卡片（Host settings.register + Browser client section，M1 起）：enabled / maxTokensPerTurn / minScore / maxHits / openingScan / subagentBudgetFactor / dbDir。保存 → settings.yaml → 重启生效。aliases/libs 等复杂项仍手改 settings.yaml。
+
 ## 配置（settings.yaml namespace knowledge-recall）
 
 ```yaml
