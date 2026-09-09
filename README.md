@@ -32,13 +32,32 @@ weaver 知识自动召回：真实用户消息到达时，自动检索本地 wea
 knowledge-recall:
   enabled: true
   maxTokensPerTurn: 400    # 0 = 关
-  minScore: 4              # title 命中≈3；多字段/多词加分（M2 实测标定）
+  minScore: 4              # title 命中≈3；多字段/多词加分（2026-09-09 自检索标定见下）
   libs: [lore, project, hardware, software-code, software-config, web, work-skill, workflow]
   maxHits: 4
   subagentBudgetFactor: 0.5
   dbDir: ''                # 空 = $DSH_HOME/weaver-kb/db（回退 ~/.dsh/weaver-kb/db）
   aliases: {}              # 追加专名表（内置见 src/index.mjs DEFAULT_ALIASES）
 ```
+
+## 自检索标定（2026-09-09）
+
+`node scripts/diagnose.mjs --per-lib 40`：对每库抽 40 条条目，用标题前 12 字当查询跑自检索，
+量 top-1/top-4 命中率与 rawScore 分布——把 minScore 从"拍"变成"量"。
+
+实测（本机 8 库，n=303）：
+
+| 指标 | 值 |
+|---|---|
+| top-1 / top-4 命中率 | 49% / 62% |
+| rawScore 分布 | p10=1 · **p50=3** · p90=6 · max=14 |
+| confidence 覆盖 | 286/303（94%） |
+| 超 180 天未更新 | 0/303 |
+
+**读法**：minScore=4 落在分布 p50 之上——纯 title 命中（3 分）会被门槛滤掉，
+这解释了 top-4 只有 62%。要提召回，候选动作是把默认降到 3（首轮已用 `max(2, minScore-2)`）；
+要保精度则维持 4。**默认值本次未改**——这是行为变更，留作显式决策。
+lore 库 top-1 仅 14%（最低），其标题普遍偏短、词面重叠高，值得单独看。
 
 ## 开发
 

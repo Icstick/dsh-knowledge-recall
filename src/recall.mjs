@@ -148,7 +148,16 @@ export function formatHits(hits, { maxTokens = 400, remainingChars = Infinity, m
   for (const h of hits.slice(0, maxHits)) {
     const title = String(h.title || '').slice(0, 60)
     const summary = String(h.summary || '').replace(/\s+/g, ' ').slice(0, 160)
+    // 2026-09-09：把库里已有却一直没读的 confidence/updated_at 带给模型——
+    // 让它自己知道这条有多新多稳（陈旧条目附「未复核」标记）。
+    const meta = []
+    if (typeof h.confidence === 'number' && Number.isFinite(h.confidence)) meta.push('conf=' + h.confidence.toFixed(1))
+    if (h.updatedAt) {
+      const day = new Date(h.updatedAt).toISOString().slice(0, 10)
+      meta.push((h.stale ? '未复核·更新于 ' : '更新于 ') + day)
+    }
     const line = '[knowledge-recall] weaver ' + h.lib + '/' + h.id + '《' + title + '》：' + summary
+      + (meta.length > 0 ? ' · ' + meta.join(' · ') : '')
     if (chars + line.length + 1 > budget) break
     lines.push(line)
     used.push(h)
