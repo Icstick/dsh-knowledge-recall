@@ -33,6 +33,7 @@ knowledge-recall:
   enabled: true
   maxTokensPerTurn: 400    # 0 = 关
   minScore: 4              # title 命中≈3；多字段/多词加分（2026-09-09 自检索标定见下）
+  loose: true              # CJK bigram 松散匹配（整词失手时按 2-gram 命中率补池，分数×0.8）
   libs: [lore, project, hardware, software-code, software-config, web, work-skill, workflow]
   maxHits: 4
   subagentBudgetFactor: 0.5
@@ -45,19 +46,38 @@ knowledge-recall:
 `node scripts/diagnose.mjs --per-lib 40`：对每库抽 40 条条目，用标题前 12 字当查询跑自检索，
 量 top-1/top-4 命中率与 rawScore 分布——把 minScore 从"拍"变成"量"。
 
+抽样是**确定性**的（按 id 等距取样，不用 `ORDER BY RANDOM()`）——否则两次运行不可比，
+A/B 就变成看噪声。
+
 实测（本机 8 库，n=303）：
 
 | 指标 | 值 |
 |---|---|
-| top-1 / top-4 命中率 | 49% / 62% |
+| top-1 / top-4 命中率 | 44% / 61% |
 | rawScore 分布 | p10=1 · **p50=3** · p90=6 · max=14 |
-| confidence 覆盖 | 286/303（94%） |
+| confidence 覆盖 | 288/303（95%） |
 | 超 180 天未更新 | 0/303 |
 
-**读法**：minScore=4 落在分布 p50 之上——纯 title 命中（3 分）会被门槛滤掉，
-这解释了 top-4 只有 62%。要提召回，候选动作是把默认降到 3（首轮已用 `max(2, minScore-2)`）；
-要保精度则维持 4。**默认值本次未改**——这是行为变更，留作显式决策。
-lore 库 top-1 仅 14%（最低），其标题普遍偏短、词面重叠高，值得单独看。
+**读法**：minScore=4 落在分布 p50 之上——纯 title 命中（3 分）会被门槛滤掉。
+要提召回，候选动作是把默认降到 3（首轮已用 `max(2, minScore-2)`）；要保精度则维持 4。
+**默认值维持 4**（2026-09-09 决策）。
+lore 库 top-1 仅 14%（最低），标题偏短、词面重叠高，值得单独看。
+
+### CJK 松散匹配的 A/B（同一批确定性样本）
+
+`--no-loose` 可关掉 bigram 松散匹配做对照：
+
+| | top-1 | top-4 |
+|---|---|---|
+| `loose: true` | 44% | 61% |
+| `loose: false` | 44% | 61% |
+
+**结论要说清楚**：自检索用的是条目**自己的标题**当查询——整词必然命中，
+所以这个探针**测不出松散匹配的价值**（它只可能让别的条目挤进候选池，而打折分数排不到前面）。
+实测差异只出现在 workflow（82% → 85%，+3pp，属抽样敏感区）。
+松散匹配真正的适用场景是**用户措辞与库内标题不同词**（近义/换序），
+那需要一个跨词表的探针，目前没有——**这项改动未经效果验证，只是可开关的召回补充**。
+不想要就 `loose: false`。
 
 ## 开发
 

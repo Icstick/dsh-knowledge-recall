@@ -97,6 +97,66 @@ function likeSearch(db, lib, term, limit, hasMeta = true) {
   return found
 }
 
+/** 松散匹配惩罚：bigram 命中不等于整词命中，分数按比例打折 */
+const LOOSE_PENALTY = 0.8
+
+/**
+ * CJK bigram 分解（2026-09-09，survey P0-1 的过渡版）。
+ * 中文没有分词，LIKE 只能整词子串匹配——「干员基建」命中不了写着「基建干员」的条目。
+ * 把查询词切成重叠 2-gram 做 OR 匹配、按命中率打分，补上"部分命中"这条路。
+ * 说明：这不是 FTS5 trigram 影子索引（那还带性能收益）；9.8k 行的规模下 LIKE 已经够快，
+ * 真正的瓶颈是匹配松紧而非速度。
+ * @param {string} term
+ * @returns {string[]}
+ */
+export function cjkBigrams(term) {
+  const s = String(term ?? '')
+  const out = []
+  const seen = new Set()
+  for (let i = 0; i < s.length - 1; i++) {
+    const g = s.slice(i, i + 2)
+    if (/[\u4e00-\u9fff]/.test(g) && !seen.has(g)) { seen.add(g); out.push(g) }
+  }
+  return out
+}
+
+/** 松散匹配检索：bigram OR 查询 + 命中率加权（仅 CJK 词、且整词无命中时兜底调用）。 */
+function likeSearchLoose(db, lib, term, limit, hasMeta = true) {
+  const grams = cjkBigrams(term)
+  if (grams.length === 0) return new Map()
+  const cols = hasMeta ? 'id, title, summary, tags, body, confidence, updated_at' : 'id, title, summary, tags, body'
+  const clause = '(title LIKE ? ESCAPE ' + "'\\'" + ' OR tags LIKE ? ESCAPE ' + "'\\'" +
+    ' OR summary LIKE ? ESCAPE ' + "'\\'" + ' OR body LIKE ? ESCAPE ' + "'\\'" + ')'
+  const where = grams.map(() => clause).join(' OR ')
+  const params = []
+  for (const g of grams) {
+    const p = '%' + likeEscape(g) + '%'
+    params.push(p, p, p, p)
+  }
+  params.push(limit)
+  let rows
+  try { rows = db.prepare('SELECT ' + cols + ' FROM entries WHERE ' + where + ' LIMIT ?').all(...params) } catch { return new Map() }
+  const found = new Map()
+  const fields = [['title', FIELD_WEIGHT.title], ['tags', FIELD_WEIGHT.tags], ['summary', FIELD_WEIGHT.summary], ['body', FIELD_WEIGHT.body]]
+  for (const r of rows) {
+    let w = 0
+    for (const [name, fw] of fields) {
+      const text = String(r[name] || '')
+      if (!text) continue
+      let hit = 0
+      for (const g of grams) if (text.includes(g)) hit += 1
+      if (hit > 0) w += fw * (hit / grams.length)
+    }
+    if (w <= 0) continue
+    found.set(r.id, {
+      lib, id: r.id, title: r.title, summary: r.summary, tags: r.tags,
+      score: w * LOOSE_PENALTY, terms: new Set([term]), via: new Set(['like-loose']),
+      confidence: r.confidence, updatedAt: r.updated_at,
+    })
+  }
+  return found
+}
+
 /** 纯拉丁词无 LIKE 命中时的 FTS5 前缀补检。 */
 function ftsSearch(db, lib, term, limit, hasMeta = true) {
   const out = new Map()
@@ -132,6 +192,7 @@ export async function searchWeaver(terms, {
   minScore = 4,
   maxHits = 4,
   perTermPerLib = 10,
+  loose = true,
 } = {}) {
   const clean = (Array.isArray(terms) ? terms : []).map(t => String(t).trim()).filter(Boolean)
   if (clean.length === 0) return []
@@ -151,6 +212,12 @@ export async function searchWeaver(terms, {
     try {
       for (const term of clean) {
         const found = likeSearch(db, lib, term, perTermPerLib, hasMeta)
+        // CJK 词：再跑一遍 bigram 松散匹配，**只补整词没命中的条目**——
+        // 整词命中者保持原分，避免同一篇被两路重复计分。
+        if (loose && /[\u4e00-\u9fff]/.test(term)) {
+          const looseHits = likeSearchLoose(db, lib, term, perTermPerLib, hasMeta)
+          for (const [id, h] of looseHits) if (!found.has(id)) found.set(id, h)
+        }
         if (found.size === 0 && /^[A-Za-z]/.test(term)) {
           const fts = ftsSearch(db, lib, term, perTermPerLib, hasMeta)
           for (const [id, h] of fts) {

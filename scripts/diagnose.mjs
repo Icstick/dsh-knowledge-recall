@@ -21,6 +21,8 @@ const argOf = (name, dflt) => {
   return i >= 0 && args[i + 1] ? args[i + 1] : dflt
 }
 const perLib = Number.parseInt(argOf('--per-lib', '30'), 10)
+/** --no-loose：关闭 CJK bigram 松散匹配，用于 A/B 对照 */
+const useLoose = !args.includes('--no-loose')
 const dbDir = argOf('--db-dir', defaultDbDir())
 
 function sampleTitles(lib, n) {
@@ -29,7 +31,13 @@ function sampleTitles(lib, n) {
   let db
   try { db = new DatabaseSync(file, { readOnly: true }) } catch { return [] }
   try {
-    return db.prepare('SELECT id, title, confidence, updated_at FROM entries ORDER BY RANDOM() LIMIT ?').all(n)
+    // 确定性抽样（2026-09-09）：ORDER BY RANDOM() 让两次运行不可比——
+    // 按 id 排序后等距取样，同一库同一 n 永远同一批样本。
+    const all = db.prepare('SELECT id, title, confidence, updated_at FROM entries ORDER BY id').all()
+    const step = Math.max(1, Math.floor(all.length / Math.max(1, n)))
+    const picked = []
+    for (let i = 0; i < all.length && picked.length < n; i += step) picked.push(all[i])
+    return picked
       .map((r) => ({ id: r.id, title: String(r.title ?? ''), confidence: r.confidence, updatedAt: r.updated_at }))
       .filter((r) => r.title.trim().length >= 4)
   } catch { return [] } finally { try { db.close() } catch { /* ignore */ } }
@@ -52,7 +60,7 @@ for (const lib of ALL_LIBS) {
     if (typeof row.confidence === 'number') withConfidence += 1
     const ts = parseTimestamp(row.updatedAt)
     if (ts !== null && now - ts > 180 * 86400000) stale += 1
-    const hits = await searchWeaver(terms, { dbDir, libs: [lib], minScore: 1, maxHits: 4 })
+    const hits = await searchWeaver(terms, { dbDir, libs: [lib], minScore: 1, maxHits: 4, loose: useLoose })
     for (const h of hits) scoreBuckets.push(h.rawScore)
     if (hits[0]?.id === row.id) top1 += 1
     if (hits.some((h) => h.id === row.id)) top4 += 1

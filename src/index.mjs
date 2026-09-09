@@ -37,8 +37,10 @@ export const Config = z.object({
   enabled: z.boolean().default(true),
   /** 单轮注入预算（tokens）；0 = 关闭注入。 */
   maxTokensPerTurn: z.number().default(400),
-  /** 命中最低分（title 命中≈3；默认 4 需 title 或多字段；M2 标定）。 */
+  /** 命中最低分（title 命中≈3；默认 4 需 title 或多字段；2026-09-09 自检索标定见 README）。 */
   minScore: z.number().default(4),
+  /** CJK bigram 松散匹配（2026-09-09）：整词 LIKE 失手的条目按 2-gram 命中率补进候选池（分数打折）。 */
+  loose: z.boolean().default(true),
   /** 检索库列表。 */
   libs: z.array(z.string()).default(ALL_LIBS),
   /** 单轮最多注入条数。 */
@@ -122,6 +124,7 @@ export function apply(ctx, config = {}) {
         libs: cfg.libs,
         minScore: isFirst ? Math.max(2, cfg.minScore - 2) : cfg.minScore,
         maxHits: isFirst ? Math.max(4, cfg.maxHits) : cfg.maxHits,
+        loose: cfg.loose !== false,
       })
       if (hits.length === 0) return decision
 
