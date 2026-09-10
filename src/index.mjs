@@ -51,6 +51,13 @@ export const Config = z.object({
   subagentBudgetFactor: z.number().default(0.5),
   /** 知识库目录（空 = $DSH_HOME/weaver-kb/db 或 ~/.dsh/weaver-kb/db）。 */
   dbDir: z.string().default(''),
+  /**
+   * 召回路径是否回写 weaver-kb 的 access_count / last_access（2026-09-10 审计后新增）。
+   * 默认 false —— 本仓调研结论明确「不回写 weaver 库」（跨插件写共享 SQLite 有并发与
+   * 归属风险，且 weaver 未提供写入 API）；且召回每轮触发，回写会形成自我强化环
+   * （召回 → 计数涨 → 排序靠前 → 更易召回）。确需热度数据时才置 true。
+   */
+  recallHotness: z.boolean().default(false),
   /** 专名/代号 → 查询词（叠加内置表）。 */
   aliases: z.object({}).default({}),
 })
@@ -83,6 +90,7 @@ export function apply(ctx, config = {}) {
     openingScan: true,
     subagentBudgetFactor: 0.5,
     dbDir: '',
+    recallHotness: false,
     aliases: {},
     ...(config && typeof config === 'object' ? config : {}),
   }
@@ -125,6 +133,8 @@ export function apply(ctx, config = {}) {
         minScore: isFirst ? Math.max(2, cfg.minScore - 2) : cfg.minScore,
         maxHits: isFirst ? Math.max(4, cfg.maxHits) : cfg.maxHits,
         loose: cfg.loose !== false,
+        // 默认 false：召回路径不回写生产 weaver-kb（见 Config.recallHotness 注释）
+        bumpHotness: cfg.recallHotness === true,
       })
       if (hits.length === 0) return decision
 

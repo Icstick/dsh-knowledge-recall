@@ -190,6 +190,7 @@ function ftsSearch(db, lib, term, limit, hasMeta = true) {
  * @param {number} [opts.minScore] 最低分（默认 4 ≈ title 级命中）
  * @param {number} [opts.maxHits] 返回上限
  * @param {number} [opts.perTermPerLib] 每词每库 LIKE 上限
+ * @param {boolean} [opts.bumpHotness] 是否回写 weaver-kb 的 access_count/last_access（默认 false）
  * @returns {Promise<Array<{lib,id,title,summary,tags,score,terms:string[],via:string[]}>>}
  */
 export async function searchWeaver(terms, {
@@ -199,6 +200,7 @@ export async function searchWeaver(terms, {
   maxHits = 4,
   perTermPerLib = 10,
   loose = true,
+  bumpHotness = false,
 } = {}) {
   const clean = (Array.isArray(terms) ? terms : []).map(t => String(t).trim()).filter(Boolean)
   if (clean.length === 0) return []
@@ -274,9 +276,13 @@ export async function searchWeaver(terms, {
     .sort((a, b) => b.score - a.score)
     .slice(0, maxHits)
 
-  // 自动注入才是最高频的命中路径：这里也记一次，否则热度数据只剩手敲 weaver_search 的那部分。
-  // best-effort —— 写失败绝不影响注入（fail-open 是 fw 的既有纪律）。
-  bumpAccessCounts(hits, dbDir)
+  // 2026-09-10 审计修正：回写改为显式开启（bumpHotness，默认 false）。
+  // 原因有二：
+  //   1) 本仓调研结论（docs/research/PEER-SURVEY-20260909.md §"不回写 weaver 库"）已明确
+  //      「跨插件写共享 SQLite 有并发与归属风险，且 weaver 未提供写入 API」——默认回写与之相悖；
+  //   2) 召回路径每轮触发，回写会形成自我强化环（召回→计数涨→排序靠前→更易召回）。
+  // 需要热度数据时由调用方显式传 bumpHotness: true（best-effort，写失败不影响注入）。
+  if (bumpHotness) bumpAccessCounts(hits, dbDir)
   return hits
 }
 

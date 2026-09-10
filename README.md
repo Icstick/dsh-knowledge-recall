@@ -38,8 +38,15 @@ knowledge-recall:
   maxHits: 4
   subagentBudgetFactor: 0.5
   dbDir: ''                # 空 = $DSH_HOME/weaver-kb/db（回退 ~/.dsh/weaver-kb/db）
+  recallHotness: false     # 召回路径是否回写 weaver-kb 的 access_count（默认 false，见下）
   aliases: {}              # 追加专名表（内置见 src/index.mjs DEFAULT_ALIASES）
 ```
+
+## 为什么不回写 weaver 库（recallHotness 默认 false）
+
+调研结论（`docs/research/PEER-SURVEY-20260909.md`）明确「**不回写 weaver 库**」：`access_count/last_access` 虽是死列，但跨插件写共享 SQLite 有并发与归属风险，且 dsh-weaver 未提供写入 API。
+
+2026-09-10 的审计发现代码曾在 `searchWeaver` 主路径无条件回写——**与本结论相悖**，且召回每轮触发会形成自我强化环（召回 → 计数涨 → 排序靠前 → 更易召回）。现已改为显式开关 `recallHotness`（默认 `false`），默认行为回到「只读」；确需热度数据时置 `true`。
 
 ## 自检索标定（2026-09-09）
 
