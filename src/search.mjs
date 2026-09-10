@@ -21,11 +21,17 @@ export function defaultDbDir() {
   return join(base, 'weaver-kb', 'db')
 }
 
-/** LIKE 通配转义。 */
+/**
+ * LIKE 通配转义（2026-09-10）。
+ * 用 '!' 而不是反斜杠作转义字符：反斜杠在 JS 字符串 → SQL 字面量 → SQLite ESCAPE 之间
+ * 要穿过三层转义，实际跑出来是 ESCAPE '\\\\'（两个字符），SQLite 会报
+ * "ESCAPE expression must be a single character"，而该异常被 catch 静默吞掉——
+ * 于是整词 LIKE 与松散匹配两条路径长期静默失效。用 '!' 彻底消除歧义。
+ */
 function likeEscape(term) {
   let out = ''
   for (const ch of String(term)) {
-    if (ch === '%' || ch === '_' || ch === '\\') out += '\\' + ch
+    if (ch === '%' || ch === '_' || ch === '!') out += '!' + ch
     else out += ch
   }
   return out
@@ -78,10 +84,10 @@ function adjustScore(score, { confidence, updatedAt }, now) {
 function likeSearch(db, lib, term, limit, hasMeta = true) {
   const esc = likeEscape(term)
   const cols = hasMeta ? 'id, title, summary, tags, body, confidence, updated_at' : 'id, title, summary, tags, body'
-  const sql = 'SELECT ' + cols + ' FROM entries WHERE title LIKE ? ESCAPE ' + "'\\'" +
-    ' OR tags LIKE ? ESCAPE ' + "'\\'" +
-    ' OR summary LIKE ? ESCAPE ' + "'\\'" +
-    ' OR body LIKE ? ESCAPE ' + "'\\' LIMIT ?"
+  const sql = 'SELECT ' + cols + ' FROM entries WHERE title LIKE ? ESCAPE ' + "'!'" +
+    ' OR tags LIKE ? ESCAPE ' + "'!'" +
+    ' OR summary LIKE ? ESCAPE ' + "'!'" +
+    ' OR body LIKE ? ESCAPE ' + "'!' LIMIT ?"
   const rows = db.prepare(sql).all('%' + esc + '%', '%' + esc + '%', '%' + esc + '%', '%' + esc + '%', limit)
   const found = new Map()
   for (const r of rows) {
@@ -125,8 +131,8 @@ function likeSearchLoose(db, lib, term, limit, hasMeta = true) {
   const grams = cjkBigrams(term)
   if (grams.length === 0) return new Map()
   const cols = hasMeta ? 'id, title, summary, tags, body, confidence, updated_at' : 'id, title, summary, tags, body'
-  const clause = '(title LIKE ? ESCAPE ' + "'\\'" + ' OR tags LIKE ? ESCAPE ' + "'\\'" +
-    ' OR summary LIKE ? ESCAPE ' + "'\\'" + ' OR body LIKE ? ESCAPE ' + "'\\'" + ')'
+  const clause = '(title LIKE ? ESCAPE ' + "'!'" + ' OR tags LIKE ? ESCAPE ' + "'!'" +
+    ' OR summary LIKE ? ESCAPE ' + "'!'" + ' OR body LIKE ? ESCAPE ' + "'!'" + ')'
   const where = grams.map(() => clause).join(' OR ')
   const params = []
   for (const g of grams) {
@@ -242,7 +248,7 @@ export async function searchWeaver(terms, {
     }
   }
   const now = Date.now()
-  return [...merged.values()]
+  const hits = [...merged.values()]
     .map((h) => {
       const updatedAt = parseTimestamp(h.updatedAt)
       const stale = updatedAt !== null && (now - updatedAt) > STALE_DAYS * 86400000
@@ -267,4 +273,42 @@ export async function searchWeaver(terms, {
     .filter(h => h.rawScore >= minScore)
     .sort((a, b) => b.score - a.score)
     .slice(0, maxHits)
+
+  // 自动注入才是最高频的命中路径：这里也记一次，否则热度数据只剩手敲 weaver_search 的那部分。
+  // best-effort —— 写失败绝不影响注入（fail-open 是 fw 的既有纪律）。
+  bumpAccessCounts(hits, dbDir)
+  return hits
+}
+
+/**
+ * 累加命中的 access_count / last_access（2026-09-10）。
+ * 写连接用 busy_timeout=3000 + 一次重试吸收并发；本函数从不抛错。
+ * @returns {number} 实际更新的行数（失败为 0）
+ */
+export function bumpAccessCounts(hits, dbDir = defaultDbDir()) {
+  const byLib = new Map()
+  for (const h of hits ?? []) {
+    if (!h || !h.lib || !h.id) continue
+    if (!byLib.has(h.lib)) byLib.set(h.lib, [])
+    byLib.get(h.lib).push(h.id)
+  }
+  let total = 0
+  for (const [lib, ids] of byLib) {
+    const file = join(dbDir, lib + '.db')
+    if (!existsSync(file)) continue
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let db
+      try {
+        db = new DatabaseSync(file)
+        db.exec('PRAGMA busy_timeout = 3000')
+        const stmt = db.prepare('UPDATE entries SET access_count = access_count + 1, last_access = ? WHERE id = ?')
+        const ts = new Date().toISOString()
+        for (const id of ids) total += stmt.run(ts, id).changes ?? 0
+        break
+      } catch { /* 静默：只读/加锁/无该列都只是没有热度数据而已 */ } finally {
+        try { if (db) db.close() } catch { /* ignore */ }
+      }
+    }
+  }
+  return total
 }

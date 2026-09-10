@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { searchWeaver, defaultDbDir, ALL_LIBS } from '../src/search.mjs'
+import { searchWeaver, defaultDbDir, ALL_LIBS, bumpAccessCounts } from '../src/search.mjs'
 
 function makeDb(dir, lib) {
   const file = join(dir, lib + '.db')
@@ -63,4 +63,36 @@ test('ALL_LIBS 覆盖 8 库且 defaultDbDir 合理', () => {
   assert.equal(ALL_LIBS.length, 8)
   const d = defaultDbDir()
   assert.ok(d.includes('weaver-kb') && d.includes('db'))
+})
+test('searchWeaver：命中后累加 access_count / last_access', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kr-test-'))
+  try {
+    const { db, file } = makeDb(dir, 'work-skill')
+    db.exec('ALTER TABLE entries ADD COLUMN access_count INTEGER DEFAULT 0')
+    db.exec('ALTER TABLE entries ADD COLUMN last_access TEXT')
+    insert(db, { id: 'wv-cnt', title: '备份清理流程', summary: '快照与清理', body: 'x', tags: '[]' })
+    db.close()
+
+    const read = () => {
+      const r = new DatabaseSync(file, { readOnly: true })
+      try { return r.prepare('SELECT access_count, last_access FROM entries WHERE id = ?').get('wv-cnt') } finally { r.close() }
+    }
+    assert.equal(read().access_count, 0)
+
+    // 注意查询词要与 title/summary 都真命中：'清理' 在 title(3)+summary(2)=5 ≥ minScore 4
+    const hits = await searchWeaver(['清理'], { dbDir: dir, libs: ['work-skill'], minScore: 4, maxHits: 4 })
+    assert.ok(hits.length >= 1, 'expected at least one hit for 清理')
+    const afterSearch = read()
+    assert.equal(afterSearch.access_count, 1, 'search 应累加一次')
+    assert.ok(afterSearch.last_access, 'last_access 应写入')
+
+    bumpAccessCounts(hits, dir)
+    assert.equal(read().access_count, 2, '显式 bump 再累加一次')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('bumpAccessCounts：库缺失/命中为空时 fail-open 不抛错', () => {
+  assert.equal(bumpAccessCounts([], 'C:/definitely/not/here'), 0)
+  assert.equal(bumpAccessCounts([{ lib: 'work-skill', id: 'x' }], 'C:/definitely/not/here'), 0)
+  assert.equal(bumpAccessCounts(null, 'C:/definitely/not/here'), 0)
 })
