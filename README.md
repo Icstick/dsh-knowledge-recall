@@ -22,6 +22,17 @@ weaver 知识自动召回：真实用户消息到达时，自动检索本地 wea
 - 节流：同会话同命中集合不重复注入
 - fail-open：检索/注入故障仅降级日志，不阻断回合
 
+## 安装
+
+```sh
+# 一键（GitHub 源；bundle patch 自动挂载 knowledge-recall 条目）
+dsh plugin --profile <name> add github:Icstick/dsh-knowledge-recall
+```
+
+装后在 profile `cordis.patch.yml` 按需补配置（namespace `knowledge-recall`，字段见下）；
+`dbDir` 留空时回退 `$DSH_HOME/weaver-kb/db` → `~/.dsh/weaver-kb/db`。零运行时依赖
+（peer：cordis / dsh-llm / schemastery；检索走 node:sqlite，Node ≥22.19）。
+
 ## 设置页
 
 设置 → 插件 →「知识召回」卡片（Host settings.register + Browser client section，M1 起）：enabled / maxTokensPerTurn / minScore / maxHits / openingScan / subagentBudgetFactor / dbDir。保存 → settings.yaml → 重启生效。aliases/libs 等复杂项仍手改 settings.yaml。
