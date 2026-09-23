@@ -189,12 +189,13 @@ export class RecallThrottle {
 /** 合计护栏常量：本插件与 ACP/memento 等插件注入合计预算（tokens/step，参照 ACP 预算承诺）。 */
 export const TOTAL_INJECT_BUDGET_TOKENS = 900
 
-/** 统计 decision.messages 中插件注入文本总字符数（source.kind==='plugin'）。 */
+/** 统计 decision.messages 中外部插件注入文本总字符数。 */
 export function injectedPluginChars(messages) {
   if (!Array.isArray(messages)) return 0
   let total = 0
   for (const m of messages) {
-    if (m && m.role === 'user' && m.source && m.source.kind === 'plugin') {
+    if (m && m.role === 'user' && m.source && typeof m.source.kind === 'string'
+      && (m.source.kind === 'plugin' || m.source.kind.startsWith('plugin:'))) {
       total += messageText(m).length
     }
   }

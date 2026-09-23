@@ -79,6 +79,9 @@ export function apply(ctx, config = {}) {
   } catch { /* settings 服务缺失时用 Config */ }
   // 设置页注册（Host 侧；Browser 侧见 client/）
   ctx.inject(['settings'], (settingsCtx) => {
+    // dsh >= 0.1.7（#4587）移除了 settings.register：无守卫时这里会抛错。
+    // 抛错被 cordis 吞掉、不影响 apply 主体，但会污染启动诊断 —— 无 register 即跳过。
+    if (typeof settingsCtx.settings?.register !== 'function') return
     settingsCtx.settings.register(SETTINGS_NAMESPACE, Config)
   })
   const cfg = {
@@ -151,7 +154,7 @@ export function apply(ctx, config = {}) {
 
       decision.messages.push(createUserMessage({
         content: [{ type: 'text', text: out.text }],
-        source: { kind: 'plugin', plugin: PLUGIN },
+        source: { kind: `plugin:${PLUGIN}` },
       }))
     } catch (err) {
       // fail-open：注入故障不得阻断 turn。

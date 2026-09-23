@@ -18,7 +18,8 @@ weaver 知识自动召回：真实用户消息到达时，自动检索本地 wea
 ```
 
 - 挂 `agent/pre-step` waterfall（step===1 且含真实用户消息），与 ACP / time-ink 注入同族（source-labelled，可审计、折叠呈现）
-- 合计护栏：与 ACP/memento 等插件注入合计 ≤ 900 tokens/step（按决策消息中 plugin 注入字符估算）
+- 合计护栏：与 ACP/memento 等插件注入合计 ≤ 900 tokens/step（按决策消息中 `plugin:` 来源的注入字符估算）
+- 召回消息使用 `source.kind: plugin:dsh-knowledge-recall` 标记生产者。
 - 节流：同会话同命中集合不重复注入
 - fail-open：检索/注入故障仅降级日志，不阻断回合
 

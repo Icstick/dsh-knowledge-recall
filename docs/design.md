@@ -16,7 +16,7 @@
 
 ## 注入协议
 - 挂 `agent/pre-step` waterfall：`await next()` 拿到完整决策后，仅 step===1、kind==='enter'、含真实用户消息时工作；
-- 追加 `createUserMessage`，source = {kind:'plugin', plugin:'dsh-knowledge-recall'}（可审计、UI 折叠、不干扰前缀缓存——消息在尾部）；
+- 追加 `createUserMessage`，source = {kind:'plugin:dsh-knowledge-recall'}（可审计、UI 折叠、不干扰前缀缓存——消息在尾部）；
 - 文本格式每条约 220 字符：`[knowledge-recall] weaver <lib>/<id>《title≤60》：summary≤160`；
 - 预算：maxTokensPerTurn（默认 400）×2 字符估算；合计护栏 TOTAL_INJECT_BUDGET_TOKENS=900（与 ACP/memento 等注入字符合计）；
 - 节流：RecallThrottle 同会话同命中签名不重复注入；

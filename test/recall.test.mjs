@@ -106,7 +106,7 @@ test('hitSignature', () => {
 
 test('injectedPluginChars 统计插件注入文本', () => {
   const msgs = [
-    { role: 'user', content: [{ type: 'text', text: 'aaa' }], source: { kind: 'plugin', plugin: 'acp' } },
+    { role: 'user', content: [{ type: 'text', text: 'aaa' }], source: { kind: 'plugin:dsh-adaptive-context' } },
     { role: 'user', content: [{ type: 'text', text: '真实' }], source: { kind: 'user' } },
   ]
   assert.equal(injectedPluginChars(msgs), 3)
