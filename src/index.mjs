@@ -27,6 +27,14 @@ import {
 } from './recall.mjs'
 import { searchWeaver, defaultDbDir, ALL_LIBS } from './search.mjs'
 import { DEFAULT_ALIASES } from './aliases.mjs'
+import {
+  load as loadStrength,
+  save as saveStrength,
+  strengthOf,
+  bump as bumpStrength,
+  prune as pruneStrength,
+  strengthPath,
+} from './strength.mjs'
 
 export { DEFAULT_ALIASES } from './aliases.mjs'
 
@@ -101,6 +109,10 @@ export function apply(ctx, config = {}) {
   const dbDir = cfg.dbDir || defaultDbDir()
   const throttle = new RecallThrottle()
   const firstScanned = new Set()
+  // 记忆强度：与 weaver 库分开的单独 JSON，随时可删（见 strength.mjs）。
+  const strengthFile = strengthPath()
+  const strengthData = loadStrength(strengthFile)
+  const strengthFn = (lib, id, nowMs) => strengthOf(strengthData, lib, id, nowMs)
 
   ctx.on('agent/pre-step', async (payload, next) => {
     // 下游先行：拿到含 ACP/WC/maid/time-ink 等注入的完整决策。
@@ -138,6 +150,7 @@ export function apply(ctx, config = {}) {
         loose: cfg.loose !== false,
         // 默认 false：召回路径不回写生产 weaver-kb（见 Config.recallHotness 注释）
         bumpHotness: cfg.recallHotness === true,
+        strengthFn,
       })
       if (hits.length === 0) return decision
 
@@ -151,6 +164,19 @@ export function apply(ctx, config = {}) {
         charsPerToken: CHARS_PER_TOKEN,
       })
       if (!out.text) return decision
+
+      // 只对「真正进了注入文本」的条目记一次引用（间隔守卫在 bump 里挡重复）。
+      // 写不进就算了——强度是加成，不是回合的必要条件。
+      try {
+        let changed = false
+        for (const h of out.hits || []) {
+          if (bumpStrength(strengthData, h.lib, h.id, Date.now())) changed = true
+        }
+        if (changed) {
+          pruneStrength(strengthData)
+          saveStrength(strengthFile, strengthData)
+        }
+      } catch { /* fail-open */ }
 
       decision.messages.push(createUserMessage({
         content: [{ type: 'text', text: out.text }],
