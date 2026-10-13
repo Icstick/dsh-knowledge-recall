@@ -22,6 +22,15 @@
 - 节流：RecallThrottle 同会话同命中签名不重复注入；
 - 子代理（delegationDepth>0）：预算 ×subagentBudgetFactor（0.5）。
 
+## 注入记账（2026-10-04）
+接 `dsh-inject-scheduler`（方案 A：注入方主动上报），与 dsh-adaptive-context / dsh-work-continuity 同形：
+- 注册段 `kr.recall`（plugin=dsh-knowledge-recall，order=30，unit=tokens，budgetChars=maxTokensPerTurn，refresh=per-turn）；
+- 经 `withService(ctx,'injectScheduler',…)` 在**服务就绪事件**后注册——本插件在 bundles 里排在调度器之前，
+  apply 时服务通常还没 provide；调度器是可选依赖，缺失/故障只降级日志；
+- 每次真正 push 进 decision 后 `reportRecallUsage(ctx, sessionId, out.text)`，记实际字符数；
+- 该接线**只记账、不拦截**：不改注入时机、内容与预算判定，接上前后注入行为逐字节相同。
+- 判据：`scripts/verify-scheduler-wiring.mjs`（读 `$DSH_HOME/storages/inject_scheduler.json`，可复跑）。
+
 ## 关键词化（recall.mjs extractKeywords）
 1. 剥样板（[acp:…] 行、system-reminder、[work-state]、历史 [knowledge-recall]）；
 2. 别名命中（内置 DEFAULT_ALIASES + 配置追加；CJK key=includes，拉丁 key=词边界）→ 值空格分词入词表；
