@@ -10,6 +10,9 @@
  *     - 节流：同会话同命中集合不重复注入；
  *     - 主/子代理通吃（子代理收到的任务消息同样触发）。
  *   fail-open：任何检索/注入故障只降级日志，不得阻断回合。
+ *   注入记账（2026-10-04）：注入后向 dsh-inject-scheduler 注册段 kr.recall 并上报实际字符数
+ *   ——此前从未注册，它的 token 不进任何配额核算、census/conflictPolicy 也看不见它。
+ *   调度器是**可选**依赖（缺失只降级不改行为），见下方 KR_SECTION_KEY / registerRecallSection。
  * @module dsh-knowledge-recall
  */
 
@@ -27,6 +30,14 @@ import {
 } from './recall.mjs'
 import { searchWeaver, defaultDbDir, ALL_LIBS } from './search.mjs'
 import { DEFAULT_ALIASES } from './aliases.mjs'
+import {
+  load as loadStrength,
+  save as saveStrength,
+  strengthOf,
+  bump as bumpStrength,
+  prune as pruneStrength,
+  strengthPath,
+} from './strength.mjs'
 
 export { DEFAULT_ALIASES } from './aliases.mjs'
 
@@ -70,6 +81,97 @@ export const SETTINGS_NAMESPACE = 'knowledge-recall'
 /** 字符/token 估算系数（中文为主文本的保守折算）。 */
 const CHARS_PER_TOKEN = 2
 
+// ── 注入调度器接线（2026-10-04 · 审计 P1 修复）────────────────────────────────
+// 背景：本插件真在注入，却从未调用 registerSection ⇒ 它每轮的 token 不进任何配额核算，
+// conflictPolicy 也检不出它（dsh-inject-scheduler 的 census 里 unregistered 恒挂着它）。
+//
+// 契约照抄 dsh-adaptive-context / dsh-work-continuity（方案 A：注入方主动上报），三处同形：
+//   · 调度器是**可选**依赖——缺失/故障只降级日志，绝不阻断注入与 turn（本仓 fail-open 纪律）；
+//   · 本插件在 profile bundles 里排在 dsh-inject-scheduler **之前**（dsh-knowledge-recall
+//     → dsh-inject-scheduler），apply 时服务通常还没 provide，所以必须经 internal/service
+//     等它就绪，不能只在 apply 里 ctx.get 一次；
+//   · 上报量 = 真正 push 进 decision.messages 的那一段文本（out.text），字符级精确。
+//
+// 与既有段的关系：acp.composer order=10、wc.work_state order=20 都落在 context 带
+// （0<order<100，见 dsh-inject-scheduler/src/domain.mjs bandOf）；本插件取 30——同带内递增，
+// 避开既有 order（同 order 异 key 才是调度器认定的冲突）。
+
+/** 本插件在注入调度器注册表中的段 key（命名空间小写点分，同 acp.composer / wc.work_state）。 */
+export const KR_SECTION_KEY = 'kr.recall'
+
+/** 段序（acp.composer=10 / wc.work_state=20 → 本插件 30）。 */
+export const KR_SECTION_ORDER = 30
+
+/** 可选服务就绪即调用（一次 ctx.get + internal/service 订阅等就绪；cordis 4 兼容）。
+ *  形态与 dsh-adaptive-context/src/index.mjs 的 withService 一致——三处同形便于对照。 */
+function withService(ctx, serviceName, fn) {
+  const existing = ctx.get(serviceName)
+  if (existing !== undefined && existing !== null) {
+    fn(existing)
+    return
+  }
+  const off = ctx.on('internal/service', (name) => {
+    if (name !== serviceName) return
+    const service = ctx.get(serviceName)
+    if (service !== undefined && service !== null) {
+      off()
+      fn(service)
+    }
+  })
+}
+
+/**
+ * 注册 kr.recall 段（幂等覆盖）。budgetChars = maxTokensPerTurn —— 本插件的配额是 token 口径，
+ * 故 unit='tokens'（与 acp.composer 同款）。子代理减半只影响单轮实际注入，不改段预算
+ * （段预算 = 主代理上限；子代理那半由本插件自己的 budgetTokens 管）。
+ */
+export function registerRecallSection(ctx, config = {}) {
+  withService(ctx, 'injectScheduler', (sched) => {
+    if (!sched || typeof sched.registerSection !== 'function') return
+    void sched.registerSection({
+      key: KR_SECTION_KEY,
+      plugin: PLUGIN,
+      order: KR_SECTION_ORDER,
+      budgetChars: config.maxTokensPerTurn ?? 400,
+      unit: 'tokens',
+      refresh: 'per-turn',
+    }).then((res) => {
+      if (res && res.ok === false) {
+        // conflictPolicy=reject 下的拒绝是真失败，必须出声（不许静默降级）。
+        ctx.logger?.warn?.('[knowledge-recall] section register rejected: '
+          + (res.message ?? res.error ?? 'unknown'))
+        return
+      }
+      // 成功只报一行 info：info 不进 startup 日志（只有 warn/error 落盘），
+      // 落盘的判据是 $DSH_HOME/storages/inject_scheduler.json 里的 kr.recall 段。
+      ctx.logger?.info?.('[knowledge-recall] section ' + KR_SECTION_KEY + ' registered with inject-scheduler')
+    }).catch((err) => {
+      ctx.logger?.warn?.('[knowledge-recall] section register failed: '
+        + (err instanceof Error ? err.message : String(err)))
+    })
+  })
+}
+
+/** 注入后上报实际注入量（fail-open：任何异常/缺失都降级日志，绝不阻断注入与 turn）。 */
+export function reportRecallUsage(ctx, sessionId, body) {
+  try {
+    if (typeof body !== 'string' || body.length === 0) return
+    const sched = ctx.get('injectScheduler')
+    if (!sched || typeof sched.recordUsage !== 'function') return
+    void sched.recordUsage({
+      ...(sessionId ? { sessionId } : {}),
+      section: KR_SECTION_KEY,
+      injectedChars: body.length,
+    }).catch((err) => {
+      ctx.logger?.warn?.('[knowledge-recall] usage report failed: '
+        + (err instanceof Error ? err.message : String(err)))
+    })
+  } catch (err) {
+    ctx.logger?.warn?.('[knowledge-recall] usage report degraded: '
+      + (err instanceof Error ? err.message : String(err)))
+  }
+}
+
 export function apply(ctx, config = {}) {
   // settings.yaml 持久化值优先（设置页保存 → 重启生效），缺失回退 Config 默认。
   try {
@@ -101,6 +203,13 @@ export function apply(ctx, config = {}) {
   const dbDir = cfg.dbDir || defaultDbDir()
   const throttle = new RecallThrottle()
   const firstScanned = new Set()
+  // 记忆强度：与 weaver 库分开的单独 JSON，随时可删（见 strength.mjs）。
+  const strengthFile = strengthPath()
+  const strengthData = loadStrength(strengthFile)
+  const strengthFn = (lib, id, nowMs) => strengthOf(strengthData, lib, id, nowMs)
+
+  // 向 dsh-inject-scheduler 注册本段（可选依赖；就绪事件到达时完成注册，见上方接线说明）。
+  registerRecallSection(ctx, cfg)
 
   ctx.on('agent/pre-step', async (payload, next) => {
     // 下游先行：拿到含 ACP/WC/maid/time-ink 等注入的完整决策。
@@ -138,6 +247,7 @@ export function apply(ctx, config = {}) {
         loose: cfg.loose !== false,
         // 默认 false：召回路径不回写生产 weaver-kb（见 Config.recallHotness 注释）
         bumpHotness: cfg.recallHotness === true,
+        strengthFn,
       })
       if (hits.length === 0) return decision
 
@@ -152,10 +262,26 @@ export function apply(ctx, config = {}) {
       })
       if (!out.text) return decision
 
+      // 只对「真正进了注入文本」的条目记一次引用（间隔守卫在 bump 里挡重复）。
+      // 写不进就算了——强度是加成，不是回合的必要条件。
+      try {
+        let changed = false
+        for (const h of out.hits || []) {
+          if (bumpStrength(strengthData, h.lib, h.id, Date.now())) changed = true
+        }
+        if (changed) {
+          pruneStrength(strengthData)
+          saveStrength(strengthFile, strengthData)
+        }
+      } catch { /* fail-open */ }
+
       decision.messages.push(createUserMessage({
         content: [{ type: 'text', text: out.text }],
         source: { kind: `plugin:${PLUGIN}` },
       }))
+
+      // 记账：只上报真正进了 decision 的那段文本（fail-open，绝不阻断注入）。
+      reportRecallUsage(ctx, sessionId, out.text)
     } catch (err) {
       // fail-open：注入故障不得阻断 turn。
       ctx.logger?.warn?.('[knowledge-recall] inject degraded: '

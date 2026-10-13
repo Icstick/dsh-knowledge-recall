@@ -22,6 +22,7 @@ weaver 知识自动召回：真实用户消息到达时，自动检索本地 wea
 - 召回消息使用 `source.kind: plugin:dsh-knowledge-recall` 标记生产者。
 - 节流：同会话同命中集合不重复注入
 - fail-open：检索/注入故障仅降级日志，不阻断回合
+- 注入记账：向 `dsh-inject-scheduler` 注册段 `kr.recall` 并上报每轮实际注入字符数（见下节）
 
 ## 安装
 
@@ -53,6 +54,40 @@ knowledge-recall:
   recallHotness: false     # 召回路径是否回写 weaver-kb 的 access_count（默认 false，见下）
   aliases: {}              # 追加专名表（内置见 src/index.mjs DEFAULT_ALIASES）
 ```
+
+## 注入调度器接线（2026-10-04）
+
+本插件此前**真在注入，却从未注册到 `dsh-inject-scheduler`**：它每轮的 token 不进任何配额核算，
+调度器的 `conflictPolicy` 与 census 也看不见它。2026-10-04 的全面审计把这条列为 P1，现已接上。
+
+接法照抄 `dsh-adaptive-context` / `dsh-work-continuity`（方案 A：注入方主动上报），三处同形：
+
+| 项 | 值 | 说明 |
+|---|---|---|
+| 段 key | `kr.recall` | 命名空间小写点分，同 `acp.composer` / `wc.work_state` |
+| order | `30` | acp=10 / wc=20 → 本插件 30（同带内递增，避开既有 order） |
+| unit | `tokens` | 本插件的配额是 token 口径 |
+| budgetChars | `maxTokensPerTurn` | 段预算 = 主代理上限（子代理减半只影响单轮实际注入） |
+| refresh | `per-turn` | 每轮注入 |
+| 上报量 | `out.text.length` | 真正 push 进 decision 的那段文本，字符级精确 |
+
+- **调度器是可选依赖**：缺失/故障只降级日志，绝不阻断注入与 turn（与 ACP/WC 同契约）。
+- **就绪时序**：本插件在 profile bundles 里排在 `dsh-inject-scheduler` **之前**，apply 时服务通常还没
+  provide，所以经 `internal/service` 等它就绪后再注册，不是 apply 里 `ctx.get` 一次就完。
+- **只看不拦**：调度器是记账/观测底座，不接管注入实现——接上它**不改任何注入行为**。
+- **改完要重启宿主**：插件源码在启动时装载，本次改动重启后才生效。
+
+### 判据（可复跑）
+
+```sh
+# 宿主重启后：段注册 + 用量记账两条一起查（只读，零依赖）
+node scripts/verify-scheduler-wiring.mjs
+node scripts/verify-scheduler-wiring.mjs --allow-empty   # 只查段注册（重启后还没发生过召回时）
+node scripts/verify-scheduler-wiring.mjs --file <store>  # 指定 store（默认 $DSH_HOME/storages/inject_scheduler.json）
+```
+
+退出码 0 = 接线生效，1 = 没生效（失败大声失败）。判据读的是宿主落盘的 domain 快照
+`<DSH_HOME>/storages/inject_scheduler.json`——调度器服务只在宿主进程内可达，没有 IPC。
 
 ## 为什么不回写 weaver 库（recallHotness 默认 false）
 
@@ -101,10 +136,11 @@ lore 库 top-1 仅 14%（最低），标题偏短、词面重叠高，值得单�
 ## 开发
 
 ```
-pnpm test          # node --test test/*.test.mjs（15 用例：关键词化/命中格式化/节流/检索）
+pnpm test          # node --test test/*.test.mjs（64 用例：关键词化/命中格式化/节流/检索/强度/调度器接线）
 ```
 
-结构：`src/recall.mjs`（纯函数，可单测）· `src/search.mjs`（SQLite 检索）· `src/index.mjs`（cordis 入口）。
+结构：`src/recall.mjs`（纯函数，可单测）· `src/search.mjs`（SQLite 检索）· `src/index.mjs`（cordis 入口 +
+调度器接线）· `scripts/verify-scheduler-wiring.mjs`（运维判据，不在运行时链路上）。
 
 ## 验证（黄金用例）
 

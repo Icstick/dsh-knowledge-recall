@@ -9,6 +9,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
+import { STRENGTH_WEIGHT } from './strength.mjs'
 
 export const ALL_LIBS = [
   'lore', 'project', 'hardware', 'software-code',
@@ -201,6 +202,7 @@ export async function searchWeaver(terms, {
   perTermPerLib = 10,
   loose = true,
   bumpHotness = false,
+  strengthFn = null,
 } = {}) {
   const clean = (Array.isArray(terms) ? terms : []).map(t => String(t).trim()).filter(Boolean)
   if (clean.length === 0) return []
@@ -263,7 +265,10 @@ export async function searchWeaver(terms, {
         // rawScore = 纯词面命中分（用于 minScore 门槛，保证召回量不因降权而缩水）；
         // score = 置信度/陈旧度调整后的排序分（用于排序与展示）
         rawScore: h.score,
-        score: adjustScore(h.score, { confidence: h.confidence, updatedAt }, now),
+        // score = 置信度/陈旧度调整后，再乘记忆强度加成（最多 +20%，见 strength.mjs）。
+        // 强度只做弱加权：相关性仍是主导；没有强度数据时乘子恒为 1（fail-open）。
+        score: adjustScore(h.score, { confidence: h.confidence, updatedAt }, now)
+          * (1 + STRENGTH_WEIGHT * (typeof strengthFn === 'function' ? (Number(strengthFn(h.lib, h.id, now)) || 0) : 0)),
         terms: [...h.terms],
         via: [...h.via],
         // 2026-09-09：库里早就有 confidence/updated_at，此前从未被读过——现在带出来
