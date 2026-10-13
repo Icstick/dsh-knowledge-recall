@@ -13,6 +13,9 @@
  *   注入记账（2026-10-04）：注入后向 dsh-inject-scheduler 注册段 kr.recall 并上报实际字符数
  *   ——此前从未注册，它的 token 不进任何配额核算、census/conflictPolicy 也看不见它。
  *   调度器是**可选**依赖（缺失只降级不改行为），见下方 KR_SECTION_KEY / registerRecallSection。
+ *   语义补充（2026-10-13 自云端 C 收回）：关键词命中不足时补一条向量检索路径。服务端在 C 上
+ *   （127.0.0.1:8765，不在本仓）；**本仓 Config.semantic 默认 false** —— A/B/W 没这个服务，
+ *   默认开会给每次召回白加一次 400ms 超时的尝试。
  * @module dsh-knowledge-recall
  */
 
@@ -28,7 +31,7 @@ import {
   injectedPluginChars,
   TOTAL_INJECT_BUDGET_TOKENS,
 } from './recall.mjs'
-import { searchWeaver, defaultDbDir, ALL_LIBS } from './search.mjs'
+import { searchWeaver, semanticSearch, defaultDbDir, ALL_LIBS } from './search.mjs'
 import { DEFAULT_ALIASES } from './aliases.mjs'
 import {
   load as loadStrength,
@@ -71,6 +74,24 @@ export const Config = z.object({
   recallHotness: z.boolean().default(false),
   /** 专名/代号 → 查询词（叠加内置表）。 */
   aliases: z.object({}).default({}),
+  /**
+   * 语义召回（2026-10-05 千寻；2026-10-13 收回本仓）。关键词路径走 LIKE + FTS5，而 unicode61
+   * 会把一长串中文整串当一个 token —— 词对不上就是零命中。开启后，关键词命中数低于
+   * semanticFallbackBelow 时补一条向量检索路径（本机 semantic-search 服务）。
+   * 服务不在/超时/报错一律 fail-open 回到原行为。
+   *
+   * 默认 **false**（与云端 C 的部署副本不同，那边是 true）：服务端 service.py 只部署在 C 上，
+   * A/B/W 三机没有 8765 —— 默认开会给每次召回白加一次超时的尝试。要开先起服务，见 README。
+   */
+  semantic: z.boolean().default(false),
+  /** 语义服务地址（systemd semantic-search.service，绑 127.0.0.1）。 */
+  semanticEndpoint: z.string().default('http://127.0.0.1:8765'),
+  /** 语义相似度门槛（0..1；越低越宽）。 */
+  semanticMinScore: z.number().default(0.42),
+  /** 语义查询超时（毫秒）。召回在首步，宁可放弃也不能拖。 */
+  semanticTimeoutMs: z.number().default(400),
+  /** 关键词命中数 < 此值时才走语义补充（1 = 只在零命中时走）。 */
+  semanticFallbackBelow: z.number().default(2),
 })
 
 const PLUGIN = 'dsh-knowledge-recall'
@@ -172,6 +193,31 @@ export function reportRecallUsage(ctx, sessionId, body) {
   }
 }
 
+/**
+ * 合并两路命中（2026-10-05 千寻）。
+ *
+ * 关键词路径的 rawScore 是词面分制（title 命中 3 分那套），语义路径是余弦相似度乘 10 ——
+ * 两套分不可比，所以这里**不比分数**：关键词结果保持原序在前（既有行为一字不变），
+ * 语义结果按相似度降序接在后面补空位，最后按上限截断。同 lib:id 去重（关键词优先）。
+ *
+ * @param {Array} kw 关键词路径（原序）
+ * @param {Array} sem 语义路径（相似度降序）
+ * @param {number} max 合并后上限
+ */
+function mergeHits(kw, sem, max) {
+  const seen = new Set()
+  const out = []
+  for (const h of [...(Array.isArray(kw) ? kw : []), ...(Array.isArray(sem) ? sem : [])]) {
+    if (!h || !h.lib || !h.id) continue
+    const key = h.lib + ':' + h.id
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(h)
+    if (out.length >= max) break
+  }
+  return out
+}
+
 export function apply(ctx, config = {}) {
   // settings.yaml 持久化值优先（设置页保存 → 重启生效），缺失回退 Config 默认。
   try {
@@ -197,6 +243,12 @@ export function apply(ctx, config = {}) {
     dbDir: '',
     recallHotness: false,
     aliases: {},
+    // 语义补充默认关（见 Config.semantic 注释：服务只部署在 C 上，A/B/W 没有 8765）。
+    semantic: false,
+    semanticEndpoint: 'http://127.0.0.1:8765',
+    semanticMinScore: 0.42,
+    semanticTimeoutMs: 400,
+    semanticFallbackBelow: 2,
     ...(config && typeof config === 'object' ? config : {}),
   }
   const aliases = { ...DEFAULT_ALIASES, ...(cfg.aliases || {}) }
@@ -237,18 +289,40 @@ export function apply(ctx, config = {}) {
       const isFirst = cfg.openingScan && !firstScanned.has(sessionId)
       if (isFirst) firstScanned.add(sessionId)
       const terms = extractKeywords(text, { aliases, maxTerms: isFirst ? 12 : 6 })
-      if (terms.length === 0) return decision
+      // 抽词为空不再直接放弃（2026-10-05）：语义路径不吃抽词这一步，
+      // 而短查询/纯专名恰恰抽不出词 —— 那正是关键词路径的死角。
+      // 语义关掉时保持原行为（零词 = 零命中，不走无谓的检索）。
+      if (terms.length === 0 && cfg.semantic === false) return decision
 
-      const hits = await searchWeaver(terms, {
+      const hitLimit = isFirst ? Math.max(4, cfg.maxHits) : cfg.maxHits
+      let hits = await searchWeaver(terms, {
         dbDir,
         libs: cfg.libs,
         minScore: isFirst ? Math.max(2, cfg.minScore - 2) : cfg.minScore,
-        maxHits: isFirst ? Math.max(4, cfg.maxHits) : cfg.maxHits,
+        maxHits: hitLimit,
         loose: cfg.loose !== false,
         // 默认 false：召回路径不回写生产 weaver-kb（见 Config.recallHotness 注释）
         bumpHotness: cfg.recallHotness === true,
         strengthFn,
       })
+
+      // 语义补充（2026-10-13 自云端 C 收回）：关键词空手或偏少时补一条向量路径。
+      // 只有两路都空才算真没料 —— 这正是 FTS5 分词失手时最需要的那一下。
+      // semantic 默认 false；服务不可达时 semanticSearch 返回 [] 并回调 onWarn 降级（只 warn，不抛）。
+      if (cfg.semantic !== false && hits.length < Math.max(1, Number(cfg.semanticFallbackBelow) || 1)) {
+        const sem = await semanticSearch(text, {
+          // 宿主 API 到此为止：search.mjs 只认 endpoint 字符串，不认 ctx（AGENTS.md）。
+          endpoint: cfg.semanticEndpoint,
+          libs: cfg.libs,
+          maxHits: hitLimit,
+          minScore: cfg.semanticMinScore,
+          timeoutMs: cfg.semanticTimeoutMs,
+          strengthFn,
+          onWarn: (err) => ctx.logger?.warn?.('[knowledge-recall] semantic degraded: '
+            + (err instanceof Error ? err.message : String(err))),
+        })
+        if (sem.length > 0) hits = mergeHits(hits, sem, hitLimit)
+      }
       if (hits.length === 0) return decision
 
       const sig = hitSignature(hits)

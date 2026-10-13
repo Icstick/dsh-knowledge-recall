@@ -23,6 +23,7 @@ weaver 知识自动召回：真实用户消息到达时，自动检索本地 wea
 - 节流：同会话同命中集合不重复注入
 - fail-open：检索/注入故障仅降级日志，不阻断回合
 - 注入记账：向 `dsh-inject-scheduler` 注册段 `kr.recall` 并上报每轮实际注入字符数（见下节）
+- 语义补充（**可选，默认关**）：关键词命中不足时补一路向量检索 —— 服务端在 C 上，A/B/W 没有，见「语义补充」节
 
 ## 安装
 
@@ -53,7 +54,41 @@ knowledge-recall:
   dbDir: ''                # 空 = $DSH_HOME/weaver-kb/db（回退 ~/.dsh/weaver-kb/db）
   recallHotness: false     # 召回路径是否回写 weaver-kb 的 access_count（默认 false，见下）
   aliases: {}              # 追加专名表（内置见 src/index.mjs DEFAULT_ALIASES）
+  semantic: false          # 语义补充（可选，默认关）；详见下节「语义补充」
+  semanticEndpoint: http://127.0.0.1:8765
+  semanticMinScore: 0.42
+  semanticTimeoutMs: 400
+  semanticFallbackBelow: 2
 ```
+
+## 语义补充（可选，**本仓默认关**）
+
+关键词路径靠 LIKE + FTS5，而 `unicode61` 会把一长串中文整段当成一个 token —— 「昨天那个检索的坑」这种句子抽出来的词跟正文对不上，就是零命中（对照 weaver `wv-20260901-009`「本地混合检索」）。语义补充在**关键词命中数 < `semanticFallbackBelow`（默认 2）**时，把**整句**原样送给一条本机向量检索服务；命中按相似度接在关键词结果**之后**（不比分数、不改关键词结果原序、同 `lib:id` 去重）。
+
+**前置：需要一个本地 8765 服务。** 服务端**不在本仓** —— C 机（cloud-server）上部署的是 `~/cloud_workspace/embed/service.py`（systemd `semantic-search.service`，绑 `127.0.0.1:8765`，bge-small-zh-v1.5 ONNX / CPU，41172×512 索引，周日 04:20 全量重建）。契约（2026-10-13 实测）：
+
+```
+GET /search?q=<整句>&k=<条数>&min=<门槛>&libs=<逗号分隔>
+  -> {ok, tookMs, q, min, hits:[{lib,id,title,summary,tags,score,confidence,updatedAt}]}   # score = 0..1 余弦
+GET /health -> {ok, count, dim, loadedAt, uptimeSec}
+```
+
+**为什么本仓默认 `false`**：A/B/W 三机**没有**这个服务，默认开会给每次召回白加一次超时等待（默认 400ms）。C 侧是它自己的部署副本（那边 `semantic: true`），不受本仓默认值影响。要开先起服务，再置：
+
+```yaml
+knowledge-recall:
+  semantic: true             # 默认 false；A/B/W 无 8765，开了只会白等一次超时
+  semanticEndpoint: http://127.0.0.1:8765
+  semanticFallbackBelow: 2   # 关键词命中数 < 此值时才补一路（1 = 只在零命中时走）
+  semanticMinScore: 0.42     # 余弦门槛，越低越宽
+  semanticTimeoutMs: 400     # 召回在首步，宁可放弃也不能拖
+```
+
+- **fail-open**：服务没起 / 超时 / 非 200 / 非 JSON / `ok:false` —— 一律返回空数组并只 warn 一行（`[knowledge-recall] semantic degraded: …`），注入行为退回「只有关键词那一路」，不阻断回合。
+- **默认一个包都不发**：`semantic: false` 时连请求都不构造（回归位见 `test/semantic.test.mjs` 的 fetch 计数用例）。
+- **只补不抢**：关键词结果原序在前，语义结果补在后面；两路分制不同（词面分 vs 余弦×10），所以合并**只看顺序、不比分数**。
+- **宿主纪律**：`search.mjs` 只认 `endpoint` 字符串，**不接受 `ctx`**（AGENTS.md）；配置由 `index.mjs` 传进去。
+- **判据**：`node --test test/semantic.test.mjs` —— 16 例，全走 `127.0.0.1` 上 `listen(0)` 的假服务，**不依赖真 8765 是否在线**。
 
 ## 注入调度器接线（2026-10-04）
 
@@ -136,7 +171,7 @@ lore 库 top-1 仅 14%（最低），标题偏短、词面重叠高，值得单�
 ## 开发
 
 ```
-pnpm test          # node --test test/*.test.mjs（64 用例：关键词化/命中格式化/节流/检索/强度/调度器接线）
+pnpm test          # node --test test/*.test.mjs（80 用例：关键词化/命中格式化/节流/检索/强度/调度器接线/语义补充）
 ```
 
 结构：`src/recall.mjs`（纯函数，可单测）· `src/search.mjs`（SQLite 检索）· `src/index.mjs`（cordis 入口 +

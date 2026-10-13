@@ -323,3 +323,96 @@ export function bumpAccessCounts(hits, dbDir = defaultDbDir()) {
   }
   return total
 }
+
+/**
+ * 语义路径（2026-10-05 千寻于云端；2026-10-13 收回本仓）。
+ *
+ * 为什么需要它：上面那条关键词路径依赖 LIKE + FTS5。库里是中文为主，
+ * unicode61 会把一长串中文整串当成一个 token —— 「昨天那个检索的坑」这种句子
+ * 抽出来的词跟正文对不上，就是零命中。语义这边把整句编码成向量查。
+ *
+ * 服务端**不在本仓**：~/cloud_workspace/embed/service.py（systemd semantic-search.service，
+ * 绑 127.0.0.1:8765，bge-small-zh-v1.5 ONNX / CPU）。A/B/W 三机没有这个服务
+ * —— 故本插件 Config.semantic 默认 false（见 index.mjs），开了也只会白等一次超时。
+ * 线上契约（2026-10-13 实测 C 侧 8765）：
+ *   GET /search?q=<整句>&k=<条数>&min=<门槛>&libs=<逗号分隔>
+ *   -> {ok, tookMs, q, min, hits:[{lib,id,title,summary,tags,score,confidence,updatedAt}]}
+ *   score = 0..1 的余弦相似度；server 侧任何异常都返回 ok:false，不抛给调用方。
+ *
+ * 契约与上面一致：返回结构对齐 searchWeaver，可直接进 formatHits。
+ * fail-open —— 服务没起、超时、返回异常，一律返回空数组，绝不阻断召回。
+ *
+ * 宿主纪律：本函数只认 endpoint 字符串，**不接受 ctx**——search.mjs 不得依赖宿主 API，
+ * 由 index.mjs 把 config 里的地址传进来（见 AGENTS.md）。
+ *
+ * @param {string} query 原始查询文本（整句，不抽词）
+ * @param {object} [opts]
+ * @param {string} [opts.endpoint] 服务地址
+ * @param {string[]} [opts.libs] 限定库
+ * @param {number} [opts.maxHits] 返回上限
+ * @param {number} [opts.minScore] 相似度门槛（0..1）
+ * @param {number} [opts.timeoutMs] 超时（召回在首步，不能拖）
+ * @param {Function} [opts.onWarn] 降级回调
+ * @param {Function} [opts.strengthFn] 记忆强度回调，签名同 searchWeaver
+ * @returns {Promise<Array<{lib,id,title,summary,tags,rawScore,score,terms,via,confidence,updatedAt,stale}>>}
+ */
+export async function semanticSearch(query, {
+  endpoint = 'http://127.0.0.1:8765',
+  libs = ALL_LIBS,
+  maxHits = 4,
+  minScore = 0.42,
+  timeoutMs = 400,
+  onWarn = null,
+  strengthFn = null,
+} = {}) {
+  const q = String(query ?? '').trim()
+  if (!q) return []
+  if (typeof fetch !== 'function') return []
+  const params = new URLSearchParams({ q, k: String(maxHits), min: String(minScore) })
+  if (Array.isArray(libs) && libs.length > 0) params.set('libs', libs.join(','))
+  let payload
+  try {
+    const res = await fetch(endpoint + '/search?' + params.toString(), {
+      signal: AbortSignal.timeout(Math.max(50, Number(timeoutMs) || 400)),
+    })
+    if (!res.ok) return []
+    payload = await res.json()
+  } catch (err) {
+    // 服务不在（还没起 / 挂了 / 超时）都走这里：这是旁路，不是主路。
+    if (typeof onWarn === 'function') onWarn(err)
+    return []
+  }
+  if (!payload || payload.ok !== true || !Array.isArray(payload.hits)) return []
+  const now = Date.now()
+  return payload.hits
+    .slice(0, maxHits)
+    .map((h) => {
+      const sim = Number(h.score)
+      if (!Number.isFinite(sim)) return null
+      const updatedAt = parseTimestamp(h.updatedAt)
+      const stale = updatedAt !== null && (now - updatedAt) > STALE_DAYS * 86400000
+      // 分制换算：关键词路径 rawScore 走「title 命中 3 分」这套，
+      // 语义是 0..1 的余弦。乘 10 只为让它落在同一量级、走同一套置信度/陈旧度调整，
+      // 不与关键词分直接比较（调用方靠顺序而非分值合并两路）。
+      const raw = sim * 10
+      const confidence = (typeof h.confidence === 'number' && Number.isFinite(h.confidence)) ? h.confidence : null
+      return {
+        lib: String(h.lib ?? ''),
+        id: String(h.id ?? ''),
+        title: String(h.title ?? ''),
+        summary: String(h.summary ?? ''),
+        tags: String(h.tags ?? '[]'),
+        rawScore: raw,
+        score: adjustScore(raw, { confidence, updatedAt }, now)
+          * (1 + STRENGTH_WEIGHT * (typeof strengthFn === 'function' ? (Number(strengthFn(String(h.lib ?? ''), String(h.id ?? ''), now)) || 0) : 0)),
+        // 语义命中没有词面证据：terms 留空、via 标注来源，
+        // 注入文本里 formatHits 不会因此崩（它对 terms 只做展示）。
+        terms: [],
+        via: ['semantic'],
+        confidence,
+        updatedAt,
+        stale,
+      }
+    })
+    .filter((h) => h && h.lib && h.id)
+}

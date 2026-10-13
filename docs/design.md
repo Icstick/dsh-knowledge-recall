@@ -31,6 +31,20 @@
 - 该接线**只记账、不拦截**：不改注入时机、内容与预算判定，接上前后注入行为逐字节相同。
 - 判据：`scripts/verify-scheduler-wiring.mjs`（读 `$DSH_HOME/storages/inject_scheduler.json`，可复跑）。
 
+## 语义补充（2026-10-13，自云端 C 收回）
+关键词路径的死角：库内以中文为主，FTS5 unicode61 把长串中文当一个 token —— 措辞与库内标题不同词就是零命中。
+- 触发：`cfg.semantic !== false` 且 `hits.length < max(1, semanticFallbackBelow)`（默认 2）；抽词为空时**不再早退**
+  （语义不吃抽词这一步，短查询/纯专名正是关键词的死角），`semantic === false` 时保持原早退行为一字不变；
+- 取数：`search.mjs` 的 `semanticSearch(query, {endpoint, libs, maxHits, minScore, timeoutMs, strengthFn, onWarn})`
+  —— **只认 endpoint 字符串，不吃 ctx**（search.mjs 不得依赖宿主 API）；`fetch` + `AbortSignal.timeout`，整句原样送 `GET /search`；
+- 合并：`mergeHits(kw, sem, max)` —— 关键词原序在前，语义按相似度接在后补空位，同 `lib:id` 去重；
+  两路分制不同（词面分 vs 余弦×10），故**不比分数**，只靠顺序；
+- fail-open：服务不在 / 超时 / 非 200 / 非 JSON / `ok:false` → 空数组 + 一行 warn，注入退回关键词一路；
+- **默认关**：本仓 `Config.semantic` 默认 `false`。服务端（`~/cloud_workspace/embed/service.py`，systemd
+  `semantic-search.service`，127.0.0.1:8765，bge-small-zh-v1.5 ONNX/CPU）**不在本仓，且只部署在 C 上**；
+  A/B/W 默认开会给每次召回白加一次超时尝试。C 侧部署副本仍是 `true`，不受本仓默认值影响。
+- 判据：`node --test test/semantic.test.mjs`（16 例，假服务走 `listen(0)` 临时端口，不依赖真 8765 在线）。
+
 ## 关键词化（recall.mjs extractKeywords）
 1. 剥样板（[acp:…] 行、system-reminder、[work-state]、历史 [knowledge-recall]）；
 2. 别名命中（内置 DEFAULT_ALIASES + 配置追加；CJK key=includes，拉丁 key=词边界）→ 值空格分词入词表；
@@ -40,10 +54,14 @@
 
 ## 实施状态
 - M0（2026-09-08）：repo 骨架/关键词化/LIKE+FTS 检索/pre-step 注入/预算护栏/节流；单测 15 → 端到端验证通过（真实提问精确命中 wv-20260902-004）
+- M3（2026-10-13）：语义补充自云端 C 收回本仓（Config 五项 + `semanticSearch` + `mergeHits`）；
+  **默认 `semantic: false`**（服务端只在 C 上）；`test/semantic.test.mjs` 16 例，全量 80 例通过
 - M1（2026-09-08）：openingScan 开场宽检索（首回合词数 12/阈值 -2）；delegationDepth 修正（session.header.delegationDepth，源码核实）；host settings.register + settings.yaml 合并；client 设置页 section（build:client → lib/client.js）；CJK 引导词剥离（CJK_LEAD）；单测 18
 
 ## 已知边界（M2 待办）
 - FTS 中文分词弱 → 中文依赖 LIKE 子串（召回够用、精度靠 minScore）；
 - minScore 默认 4 为初值，需真实消息语料标定（G4 代号类噪声：库缺内容 + 泛词，观察记录中）；
 - aliases/libs 等复杂配置项暂无 UI（settings.yaml 手改）；
-- 注入第三条噪声观察：settings 卡片词法误命中相关度一般条目（调优随 M2）。
+- 注入第三条噪声观察：settings 卡片词法误命中相关度一般条目（调优随 M2）；
+- 语义补充的**效果未经本机标定**：A/B/W 无 8765 服务，无法在本地量它对召回率的贡献；阈值（0.42）与
+  回退线（2）沿用 C 侧经验值，未在本仓样本上复核。跨机能力不对齐本身见 `docs/ops/semantic-port-20261013.md`。
