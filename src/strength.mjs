@@ -41,10 +41,23 @@ export const MIN_N = 2
 const SAME_DAY_MS = 12 * 3600 * 1000
 const MAX_ENTRIES = 4000
 
-/** 默认落在 $DSH_HOME/memory-strength.json（与 weaver 库分开，随时可删）。 */
+/**
+ * 默认落在 $DSH_HOME/memory-strength.json（与 weaver 库分开，随时可删）。
+ *
+ * 2026-10-13：DSH_HOME 未设时的兜底改成**按存在性探测**。
+ * 起因：C 机（cloud-server）的交互家是 `~/.dsh-web`（systemd 里钉的 DSH_HOME），
+ * 而 A/W 的默认家是 `~/.dsh`；两侧原先各写死一个，导致同一份代码在两处行为不同。
+ * 现在：`.dsh` 优先（保住「默认家」这个约定），那里没有该文件才落到 `.dsh-web`。
+ * 判据用 existsSync 而不是「目录在不在」——C 上 `~/.dsh` 也存在（那是 headless worker 的家），
+ * 但没有 knowledge-recall 在跑，所以它不会有这个文件。
+ */
 export function strengthPath(env = process.env) {
-  const home = env.DSH_HOME || path.join(os.homedir(), '.dsh')
-  return path.join(home, 'memory-strength.json')
+  if (env.DSH_HOME) return path.join(env.DSH_HOME, 'memory-strength.json')
+  for (const dir of ['.dsh', '.dsh-web']) {
+    const p = path.join(os.homedir(), dir, 'memory-strength.json')
+    try { if (fs.existsSync(p)) return p } catch { /* fail-open：探测失败就当它不在 */ }
+  }
+  return path.join(os.homedir(), '.dsh', 'memory-strength.json')
 }
 
 /** 读；缺文件或坏 JSON 都返回空表。 */
